@@ -6,6 +6,24 @@
     @discard="editing = false"
   >
     <template v-if="!editing" #actions>
+      <!-- shows the slashed pin on hover so the click's effect is visible first -->
+      <Button
+        v-if="pinned"
+        variant="ghost"
+        class="group text-ink-violet-5"
+        :tooltip="__('Unpin')"
+        :aria-label="__('Unpin')"
+        @click="togglePin"
+      >
+        <template #icon>
+          <PinIcon
+            class="size-4 group-hover:hidden group-focus-visible:hidden"
+          />
+          <UnpinIcon
+            class="hidden size-4 group-hover:block group-focus-visible:block"
+          />
+        </template>
+      </Button>
       <Dropdown
         align="end"
         :options="kebabOptions"
@@ -37,6 +55,7 @@
 </template>
 
 <script setup lang="ts">
+import { PinIcon, UnpinIcon } from "@/components/icons";
 import { useAuthStore } from "@/stores/auth";
 import { useConfigStore } from "@/stores/config";
 import { useUserStore } from "@/stores/user";
@@ -47,9 +66,9 @@ import {
   CommentItem,
   type CommentActivity,
 } from "@framework/ui/ActivityTimeline";
-import { Button, Dropdown, createResource, toast } from "frappe-ui";
+import { Button, Dropdown, Tooltip, createResource, toast } from "frappe-ui";
 import { storeToRefs } from "pinia";
-import { computed, ref } from "vue";
+import { computed, h, ref } from "vue";
 import TimelineReactions from "./TimelineReactions.vue";
 
 export interface CommentExtras {
@@ -57,9 +76,14 @@ export interface CommentExtras {
   attachments: Array<{ file_name: string; file_url: string }>;
 }
 
+// mirrors MAX_PINNED_COMMENTS in helpdesk/extends/comment.py, which enforces it
+const MAX_PINNED_COMMENTS = 5;
+
 const props = defineProps<{
   activity: CommentActivity;
   extras: CommentExtras;
+  pinned: boolean;
+  pinCount: number;
 }>();
 const emit = defineEmits<{ update: [] }>();
 
@@ -84,12 +108,24 @@ const isOwner = computed(() => {
 const isMergeMarker = computed(() =>
   /has been merged with ticket #\d+/.test(props.activity.data.content)
 );
+const pinLimitReached = computed(
+  () => !props.pinned && props.pinCount >= MAX_PINNED_COMMENTS
+);
 
 const kebabOptions = computed(() => [
   {
     label: __("Copy link"),
     icon: "lucide-link",
     onClick: () => copyActivityLink("comment", props.activity.data.name),
+  },
+  {
+    label: props.pinned ? __("Unpin") : __("Pin"),
+    icon: h(props.pinned ? UnpinIcon : PinIcon, { class: "size-4" }),
+    onClick: togglePin,
+    ...(pinLimitReached.value && {
+      disabled: true,
+      slots: { label: pinLimitLabel },
+    }),
   },
   // only the author edits or deletes; anyone may share the link
   ...(isOwner.value && !isMergeMarker.value
@@ -145,6 +181,33 @@ function saveContent(content: string) {
         emit("update");
         toast.success(__("Comment updated successfully."));
       },
+    }
+  );
+}
+
+// disabled menu items drop pointer events, so the label opts back in for the tooltip
+function pinLimitLabel() {
+  const reason = __("{0} pinned already. Unpin one to pin this.", [
+    MAX_PINNED_COMMENTS,
+  ]);
+  return h(Tooltip, { text: reason, side: "right" }, () =>
+    h("div", { class: "pointer-events-auto truncate" }, __("Pin"))
+  );
+}
+
+// any agent may pin; the server caps pins per ticket and says so on failure
+function togglePin() {
+  saveComment.submit(
+    {
+      doctype: "Comment",
+      name: props.activity.data.name,
+      fieldname: "is_pinned",
+      value: props.pinned ? 0 : 1,
+    },
+    {
+      onSuccess: () => emit("update"),
+      onError: (error: { messages?: string[] }) =>
+        toast.error(error.messages?.[0] ?? __("Could not pin the comment")),
     }
   );
 }

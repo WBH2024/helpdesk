@@ -220,3 +220,84 @@ test.describe("reactions", () => {
     await expect.poll(reactionLogs).toEqual([{ subject: "1 person reacted to your comment" }]);
   });
 });
+
+test("pinned comments cycle in a bar that never shifts the feed", async ({ page, api, ticket }) => {
+  // a feed long enough to scroll; a short one is top-aligned, so the bar pushes it down
+  for (let i = 0; i < 10; i++) await addComment(api, ticket.name, `Filler ${i}`);
+  const older = `Older pin ${uid()}`;
+  const newer = `Newer pin ${uid()}`;
+  await addComment(api, ticket.name, older);
+  await addComment(api, ticket.name, newer);
+  await openTicket(page, ticket.name, "#comment");
+
+  const panel = page.locator("[role=tabpanel][data-state=active]");
+  const rowWith = (text: string) => panel.locator(".activity", { hasText: text });
+  const bar = panel.getByRole("button", { name: /Go to pinned comment/ });
+  const topOf = (text: string) => rowWith(text).evaluate((row) => row.getBoundingClientRect().top);
+  const unpinButton = (text: string) =>
+    rowWith(text).getByRole("button", { name: "Unpin", exact: true });
+  const pin = async (text: string) => {
+    await rowWith(text).getByRole("button").first().click();
+    await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
+  };
+  await expect(rowWith(newer)).toBeVisible();
+  const restingTop = await topOf(newer);
+
+  await pin(older);
+  await expect(bar).toContainText(older);
+  await pin(newer);
+  await expect(bar).toContainText(newer);
+  await expect(
+    panel.getByRole("button", { name: "Unpin", exact: true })
+  ).toHaveCount(2);
+  expect(await topOf(newer)).toBe(restingTop);
+
+  // newest first; each click jumps to the shown pin, then steps to the older one
+  await bar.click();
+  await expect(bar).toContainText(older);
+  await bar.click();
+  await expect(rowWith(older)).toBeInViewport();
+  await expect(bar).toContainText(newer);
+
+  await rowWith(newer).scrollIntoViewIfNeeded();
+  const pinnedTop = await topOf(newer);
+  await unpinButton(older).click();
+  await expect(bar).toContainText(newer);
+  await unpinButton(newer).click();
+  await expect(bar).toHaveCount(0);
+  expect(await topOf(newer)).toBe(pinnedTop);
+});
+
+test("a sixth pin is blocked until one of the five is unpinned", async ({ page, api, ticket }) => {
+  const notes = Array.from({ length: 6 }, (_, i) => `Note ${i + 1} ${uid()}`);
+  const names: string[] = [];
+  for (const note of notes) names.push(await addComment(api, ticket.name, note));
+  for (const name of names.slice(0, 5)) await api.update("Comment", name, { is_pinned: 1 });
+  await openTicket(page, ticket.name, "#comment");
+
+  const panel = page.locator("[role=tabpanel][data-state=active]");
+  const rowWith = (text: string) => panel.locator(".activity", { hasText: text });
+  const unpinButtons = panel.getByRole("button", { name: "Unpin", exact: true });
+  const pinItem = page.getByRole("menuitem", { name: "Pin", exact: true });
+  const openMenu = (text: string) => rowWith(text).getByRole("button").first().click();
+  await expect(unpinButtons).toHaveCount(5);
+  await expect(panel.getByRole("button", { name: "Go to pinned comment 5" })).toBeVisible();
+
+  await openMenu(notes[5]);
+  await expect(pinItem).toHaveAttribute("aria-disabled", "true");
+  // the item ignores the pointer; only its label takes the hover for the reason
+  await pinItem.getByText("Pin", { exact: true }).hover();
+  await expect(page.getByText("5 pinned already. Unpin one to pin this.").first()).toBeVisible();
+  // the first Escape closes the tooltip, the second the menu
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menu")).toHaveCount(0);
+
+  await rowWith(notes[0]).getByRole("button", { name: "Unpin", exact: true }).click();
+  await expect(unpinButtons).toHaveCount(4);
+  await openMenu(notes[5]);
+  await expect(pinItem).not.toHaveAttribute("aria-disabled", "true");
+  await pinItem.click();
+  await expect(rowWith(notes[5]).getByRole("button", { name: "Unpin", exact: true })).toBeVisible();
+  await expect(unpinButtons).toHaveCount(5);
+});
