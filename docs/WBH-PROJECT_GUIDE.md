@@ -4,7 +4,8 @@ A reference for developers who extend, add features to, or fix bugs in this repo
 
 - **Snapshot:** branch `WBH-9-2026`, app version `1.30.1` (`helpdesk/__init__.py`), last commit `1c3361c` "chore(release): Bumped to Version 1.30.1" (2026-09-03). The history contains no WBH-specific commits yet, so this checkout matches upstream `frappe/helpdesk` at that release (checked with `git log`).
 - **How to read the citations:** every claim names the file(s) behind it in backticks, with `:line` where useful. Line numbers are from the snapshot above and will drift.
-- **"Unverified"** marks anything inferred from names, comments, or partial reads that was not confirmed by reading the code path end to end or by running it. Nothing in this guide was confirmed by running the app, because no bench or site exists in the environment where it was written.
+- **"Unverified"** marks anything inferred from names, comments, or partial reads that was not confirmed by reading the code path end to end or by running it. Nothing in this guide was confirmed by running the app, because no bench or site exists in the environment where it was written. The only thing executed was one isolated esbuild check (§6.6).
+- **How it was produced:** module by module. Parallel research passes covered the DocTypes, the API and backend utilities, the frontend core, and `desk/src/components/`. The headline claims were then re-checked against the cited lines, and every cited path was checked to exist.
 - **Companion files:** `AGENTS.md` (the project's binding coding rules; this guide summarises them in §5 but does not replace them) and `CLAUDE.md` (a short command-and-convention cheat sheet).
 
 ## Contents
@@ -205,7 +206,66 @@ The frappe-ui plugin runs with `frappeProxy: true` (`desk/vite.config.js:22`), w
 
 ### 3.4 Frontend components: `desk/src/components/`
 
-_Filled in from the components research (next edit)._
+The folder holds 347 files: 302 `.vue`, 41 `.ts`, and 1 `.jsx`. Local components are auto-registered. Several are used in templates with no import, for example `EmailContent` in `EmailArea.vue:99`. The registration comes from a Vite plugin, and which plugin config does it is **Unverified**; `desk/src/main.js:28-37` registers only frappe-ui globals.
+
+| Folder | What it serves | Key files |
+|---|---|---|
+| `Settings/` (≈100 files) | The **Settings modal**. Tabs are declared in `settingsModal.ts:41-150`, grouped as: Profile, Preferences; Email Accounts, Email Notifications; General, Agents, Invite Agents, Teams, SLA Policies, Business Holidays, Assignment Rules, Field Dependencies, Saved Replies; Telephony, ERPNext | `SettingsModal.vue`, `settingsModal.ts`, `Sla/SlaPolicyView.vue`, `Assignment Rules/AssignmentRuleView.vue`, `EmailConfig.vue` |
+| `ticket-agent/` | The agent ticket page: header, activity panel with tabs (Activity, Emails, Comments, Calls, Analytics), sidebar, assignment, bulk modals, and `analytics/` | `TicketHeader.vue`, `TicketActivityPanel.vue`, `TicketDetailsTab.vue`, `AssignTo.vue` |
+| `ticket/` | The activity timeline, merge/split/export modals, the customer ticket sidebar, and mobile or legacy widgets | `TicketAgentActivities.vue`, `TicketMergeModal.vue`, `TicketCustomerSidebar.vue` |
+| Top-level editor and communication files | Reply composer and timeline rows | `CommunicationArea.vue`, `EmailEditor.vue` (sends through `run_doc_method` → `reply_via_agent`, `:445-450`), `CommentTextEditor.vue` (→ `new_comment`), `EmailArea.vue`, `CommentBox.vue`, `SavedRepliesSelectorModal.vue` |
+| `editor/config.ts` | Shared Tiptap extensions and toolbars (`buildEditorExtensions`, `fullToolbar`, `ticketToolbar`, `commentToolbar`) | `editor/config.ts` |
+| `ListViewBuilder.vue`, `ListRows.vue`, `view-controls/` | **The generic list page**, used for tickets, customers, contacts, call logs, and KB articles: filters, sort, columns, quick filters, views, bulk delete | `ListViewBuilder.vue`, `view-controls/filter/Filter.vue` (the filter actually in use), `view-controls/QuickFilters.vue` |
+| `conditions-filter/` | Nested condition builder, used **only** in the SLA and Assignment Rule settings | `CFConditions.vue`, `CFCondition.vue` |
+| `layouts/` | App chrome: `DesktopLayout` (Sidebar + AppHeader + Notifications), `MobileLayout`; sidebars; the settings page frame | `Sidebar.vue`, `AppSidebar.vue`, `layoutSettings.ts` (sidebar items for agent vs customer), `SettingsLayoutBase.vue` |
+| `command-palette/` | Cmd/Ctrl+K palette and its command modules, documented in its own `README.md` and `how-it-works.md` | `CommandPalette.vue`, `useCommandPalette.ts`, `ticketCommands.ts` |
+| `knowledge-base/` | KB cards and category modals | `CategoryFolderContainer.vue`, `ArticleFeedback.vue`, `CategoryModal.vue` |
+| `customer/`, `contact/` | Customer and contact detail tabs and dialogs | `customer/NewCustomerDialog.vue`, `contact/EditContactDialog.vue` |
+| `telephony/`, `CallArea.vue` | Twilio/Exotel call UI (with the `telephony` app) | `telephony/CallUI.vue` |
+| `SavedReplyActions/`, `tag/` | Staged saved-reply actions; the ticket tag editor | `SavedReplyActions.vue`, `tag/Tags.vue` |
+| `erpnext-integration/` | The ERPNext settings tab | `ERPNextIntegrationSettings.vue` |
+| `frappe-ui/` | **Local re-implementations**, not wrappers: `Autocomplete`, `Dropdown`, `MultiSelectCombobox` (built on `@headlessui/vue`), `Link`, `PhoneControl`, `DurationPicker`. Presumably these keep an older, headlessui-era API (**Unverified**) | `frappe-ui/Link.vue`, `frappe-ui/PhoneControl/PhoneControl.vue` |
+| `icons/` | Custom SVG icon components; `index.ts` re-exports most of them | `icons/index.ts` |
+| `dialogs.jsx` | Imperative global dialogs: `createDialog()`, installed as `$dialog` | `dialogs.jsx:35`; `desk/src/main.js:77` |
+| `index.ts` | Barrel export of commonly used components | `index.ts:1-28` |
+
+**How the agent ticket page is built.** This is the most complex tree.
+
+- **Page.** `pages/ticket/TicketAgent.vue` renders `TicketHeader`, `TicketActivityPanel`, and `TicketSidebar`. It `provide`s the ticket resources built by `useTicket()` through typed symbols (`TicketSymbol`, `AssigneeSymbol`, `ActivitiesSymbol`, …; `desk/src/types.ts:753-774`). It also subscribes to the ticket socket events (`TicketAgent.vue:104-151, 203-220`).
+- **Sidebar.** `TicketDetailsTab.vue` injects those symbols and renders the contact, SLA, feedback, the overview fields (`TicketField`), `AssignTo`, `Tags`, and the custom fields. Field edits call the ticket document resource's `setValue`, which becomes Frappe `set_value`, then reload the activities (`TicketDetailsTab.vue:346-362`).
+- **Reply flow.** It is event-drilled through four hops:
+  1. `EmailArea` emits `reply`.
+  2. `TicketAgentActivities` re-emits it as `email:reply`.
+  3. `TicketActivityPanel` calls `communicationAreaRef.replyToEmail()`.
+  4. `CommunicationArea` calls `EmailEditor.addToReply()`.
+
+  Source: `EmailArea.vue:205`; `TicketAgentActivities.vue:81`; `TicketActivityPanel.vue:18`; `CommunicationArea.vue:163-172`.
+- **Assignment.** `AssignTo.vue` adds assignees through `frappe.desk.form.assign_to.add` and removes them through `helpdesk.api.doc.remove_assignments`. It also inserts an `HD Ticket Activity` **from the client** (`AssignTo.vue:518-544`); `command-palette/ticketCommands.ts:355-391` duplicates this.
+
+**Reuse these before writing new components:**
+
+- **Page building blocks.**
+  - `ListViewBuilder.vue`: any list page.
+  - `layouts/SettingsLayoutBase.vue`: any settings tab.
+  - `LayoutHeader.vue`: page header, teleported to `#app-header`.
+  - `Section.vue`: collapsible sidebar section.
+  - `EmptyState.vue`.
+- **Dialogs and dirty state.** `ConfirmDialog.vue` or `$dialog`; `UnsavedBadge.vue`, `DiscardButton.vue`.
+- **Editors.** `CompactEditor.vue`, or build a new editor with `editor/config.ts`.
+- **Fields and inputs.**
+  - `TicketField.vue`: renders any HD Ticket field.
+  - `EmailMultiSelect.vue`, `AttachmentList.vue`.
+  - `UserAvatar.vue`, `MultipleAvatar.vue`.
+- **Charts.** `ChartCardBase.vue`, `LineChartCard.vue`, `BarChartCard.vue`.
+- **Conditions.** `conditions-filter/CFConditions.vue`.
+
+**Conventions observed in this folder** (counted with grep; see §5.4 for the rules):
+
+- **Script style.** 213 components use `<script setup lang="ts">`, 35 use JavaScript `<script setup>`, and 3 still use the Options API.
+- **Icons.** Lucide appears in about 85 files and FeatherIcon in about 40 (8 files mix both).
+- **Colours.** Semantic Tailwind tokens dominate (≈1,266 uses). There are about 66 *coloured* semantic tokens, against the gray-only rule.
+- **Translation.** `__()` is used about 1,374 times, but about 31 components still contain hard-coded English, including the ticket tab labels in `ticket-agent/TicketActivityPanel.vue:85-110`.
+- **Settings sub-screen navigation** uses five different patterns (`update:step`, `updateStep`, module-level `*ActiveScreen` refs, provide/inject, `onBack` props). Pick the one the neighbouring tab uses.
 
 ## 4. Architecture and data flow
 
@@ -556,8 +616,273 @@ This integration is active only when ERPNext is installed **and** `ERPNext HD Se
 
 ## 5. Where to start, and the conventions to follow
 
-_Section in progress._
+### 5.1 Orientation: read these files in this order
+
+1. `helpdesk/hooks.py`: everything the framework calls into.
+2. `helpdesk/helpdesk/doctype/hd_ticket/hd_ticket.json` and `hd_ticket.py`: the core model and its lifecycle (§4.3).
+3. `helpdesk/helpdesk/doctype/hd_ticket/api.py`: ticket endpoints used by both portals.
+4. `helpdesk/utils.py`: permission helpers and `publish_event`.
+5. `helpdesk/api/doc.py`: how every list view gets its data.
+6. `desk/src/main.js`, then `desk/src/router/index.ts`, then `desk/src/roots/PortalRoot.vue`: how the SPA boots and routes.
+7. `desk/src/pages/ticket/TicketAgent.vue` and `desk/src/composables/useTicket.ts`: the busiest screen.
+8. `AGENTS.md`: the rules your PR will be reviewed against.
+
+### 5.2 Recipes for common changes
+
+| I want to… | Start here | Watch out for |
+|---|---|---|
+| **Add a field to HD Ticket** | Edit the DocType in Desk with `developer_mode` on, which writes `hd_ticket.json`, or add a Custom Field through a patch (see `helpdesk/patches/add_tag_custom_fields.py`) | To show it as a list column, see `HDTicket.default_list_data` (`hd_ticket.py:1131`) and `HD View` columns. To control portal visibility, see the template fields' `hide_from_customer` (`hd_ticket_template_field` JSON) and `show_customer_portal_fields` in `helpdesk/api/doc.py`. Regenerate the frontend types by running `yarn dev` (the `frappeTypes` option in `desk/vite.config.js:30-43`) |
+| **Add an API endpoint** | A new function in the matching `helpdesk/api/<area>.py` with `@frappe.whitelist()` and **type-annotated parameters** (`helpdesk/hooks.py:10`), plus `@agent_only` or `@agent_manager_only` when it is not for customers (`helpdesk/utils.py:179,207`) | Prefer `frappe.qb.get_query(..., ignore_permissions=False)` for new queries (`AGENTS.md` "Data Query Patterns"). Plain `frappe.qb` or `frappe.get_all` **skip** the ticket `permission_query` (§4.4). Call it from the SPA with `createResource({ url: "helpdesk.api.<module>.<fn>" })` |
+| **Change ticket behaviour on save** | A method on `HDTicket`, called from the right lifecycle hook (§4.3.2) | Keep hooks as one-line calls and save once (§5.4). Hooks fire on **every** save, including SLA refreshes and communication updates |
+| **Add a DocType** | Create it in Desk (developer mode, module `Helpdesk`, see `helpdesk/modules.txt`) so the JSON, `.py`, and test stub are generated | For row-level security, register `has_permission` or `permission_query_conditions` in `helpdesk/hooks.py:106-117`. If the SPA needs types, add the doctype to `frappeTypes` in `desk/vite.config.js` |
+| **Add an HD Settings toggle** | A field in `hd_settings.json`, then expose it in `helpdesk/api/config.py` (if the UI needs it), map it in `desk/src/stores/config.ts`, and add a control under `desk/src/components/Settings/` | `get_config` is **guest-accessible**, so do not expose secrets there. Settings saves broadcast `helpdesk:settings-updated` (`hd_settings/hd_settings.py:87-91`) |
+| **Add a page to the SPA** | A component in `desk/src/pages/…` and a route in `desk/src/router/index.ts`. Customer routes need `meta: { public: true }` | Routing is not security; enforce access on the server. Use `__()` for every string |
+| **Push live updates to the UI** | `publish_event("<app>:<event>", room=get_doc_room(doctype, name), data=…)` from a controller (`helpdesk/utils.py:76-97`); listen with `$socket.on` from `globalStore()` | Unsubscribe with the **same handler** (`$socket.off(event, handler)`). A bare `off(event)` removes every listener for that event (§6.3) |
+| **Add a data migration** | A module in `helpdesk/patches/` with `execute()`, plus a line in `helpdesk/patches.txt`, usually under `[post_model_sync]` | Patches run once per site and must be idempotent. `set_portal_defaults` shows why writing Singles directly can beat `doc.save()` during migrations (`helpdesk/setup/install.py:230-247`) |
+| **Add install-time defaults** | `helpdesk/setup/install.py` `after_install` for new sites, **plus** a patch for existing sites | `add_fts_index` must stay last because DDL commits (`helpdesk/setup/install.py:38-39`) |
+| **Touch the ERPNext sync** | `helpdesk/integrations/erpnext/` and its tests | Keep the `ignore_erpnext_sync` and cascade flags intact, or updates will ping-pong (§4.8). AGENTS.md requires a spec doc for this feature (§6.4) |
+| **Add or change translatable strings** | `_()` in Python and `__()` in the SPA | Do not wrap f-strings in `_()`; use `_("… {0}").format(x)`. Several existing violations are listed in §6 |
+
+### 5.3 Bug-fix workflow
+
+1. **Reproduce on a site, reading only.** `AGENTS.md` rule 1: query the site to learn the current data state before assuming anything, and **never write data to a site unless the user explicitly asks**. It shows a read-only query pattern that uses the bench venv.
+2. **Locate the code path.** Search `helpdesk/hooks.py` for framework-triggered behaviour; `helpdesk/helpdesk/doctype/<dt>/` for model rules; `desk/src` for the dotted API path the UI calls.
+3. **Write a failing test next to the code** (`test_<doctype>.py`, or `helpdesk/api/test_<module>.py`). Use `FrappeTestCase` like the existing tests, and import factories from `helpdesk/test_utils.py`. Add any missing helper **there**, with a docstring (`AGENTS.md` rule 3).
+4. **Fix it**, following §5.4.
+5. **Run the checks.** `bench --site <site> run-tests --module <dotted.test.module>`, then the full app suite if the change is wide. Then `pre-commit run --all-files`.
+6. **Update the spec, if one exists** for the feature (`AGENTS.md` rule 2), in the same change.
+7. **Commit** with a Conventional Commit message (`commitlint.config.mjs`).
+
+### 5.4 Conventions (from `AGENTS.md` unless noted)
+
+**Backend**
+
+- **Controller structure.** Lifecycle hooks contain no inline logic; they only call `self.<method>()`. All logic lives in methods on the class. `@staticmethod` is allowed for pure transforms (`AGENTS.md` "Controller Code Structure").
+- **Save discipline.** Mutate everything, then call `.save()` once, in the hook or in the method that owns the mutation. Never save inside a helper. Never fetch the same document twice in a hook; pass it down instead. A method that fully creates a document may save it (`AGENTS.md`).
+  - The named reference implementation is `HDTeam`. Only `after_insert` fully follows the rule: `on_update`, `on_trash`, and `after_rename` still contain inline logic (`helpdesk/helpdesk/doctype/hd_team/hd_team.py:21-61`). Copy the rule, not every line.
+- **Queries.** Prefer `frappe.qb.get_query()` over `frappe.db.get_all()`, with `ignore_permissions=False` when permissions matter.
+- **Whitelisted methods** must type-annotate their parameters (`helpdesk/hooks.py:10`).
+- **Extension points.** Use `override_doctype_class` for class overrides (`helpdesk/overrides/`) and `doc_events` for function hooks (`helpdesk/extends/`), both declared in `helpdesk/hooks.py`.
+- **Tests.**
+  - All helpers go in `helpdesk/test_utils.py`, with docstrings. Name them `make_<doctype>` for factories, `enable_<x>` / `disable_<x>` for toggles, and use a descriptive verb for queries.
+  - Existing code drifts from this: legacy `create_*` names, overlapping `create_agent` and `make_agent`, and helpers defined inline in several test files (§6.4).
+- **Formatting.** black, isort (black profile), and flake8 run through pre-commit (`.pre-commit-config.yaml`). semgrep runs in CI (`.github/workflows/lint.yml`).
+
+**Frontend**
+
+- **Components.** `<script setup lang="ts">`, the Composition API, PascalCase names, and small components (`AGENTS.md` "Frontend: Vue 3 Development Standards").
+- **Data fetching.** `createResource`, `createListResource`, and `createDocumentResource` from frappe-ui, never `useFetch`.
+- **Icons.** Lucide only in new code (`<LucideX />` auto-registered, or `import LucideX from "~icons/lucide/x"`). `FeatherIcon` is only for maintaining existing code.
+- **Styling.** Tailwind with semantic tokens (`text-ink-gray-*`, `bg-surface-*`, `border-outline-gray-*`, `text-p-*`) and **gray shades only**, even for primary states. The existing status and tag colours in `desk/src/stores/ticketStatus.ts` and `desk/src/composables/useTags.ts` are data-driven exceptions.
+- **State.** Pinia for shared state; `ref`, `reactive`, and `computed` for local state; `@vueuse/core` before writing your own helpers.
+- **i18n.** Every user-visible string goes through `__()`.
+- **Comments** explain *why*, not *what*.
+
+**Process**
+
+- **Spec-driven development.** If a feature has a spec document, update it in the same change so it reflects what is implemented (`AGENTS.md` rule 2).
+- **Commits.** Conventional Commits (`commitlint.config.mjs`). Upstream takes PRs on `develop` only (`.mergify.yml`).
+
+**Where AGENTS.md and the code disagree** (confirmed; check before you rely on AGENTS.md):
+
+| AGENTS.md says | Reality |
+|---|---|
+| "TypeScript is enabled but not in strict mode" (`AGENTS.md:55`) | `desk/tsconfig.json` extends `frappe-ui/tsconfig.base.json` and adds strict-style flags. The frontend research found that the published frappe-ui 1.0.0-beta.24 base sets `"strict": true`; that was not re-checked here, because `node_modules` is not installed. Either way, **nothing runs `tsc` or `vue-tsc`** (`desk/package.json` has no such script), so types are not enforced |
+| Components are auto-imported via `desk/components.d.ts` (`AGENTS.md:152,266,349`) | That file is gitignored (`.gitignore`) and absent. It is generated when the dev server runs |
+| Example endpoint `helpdesk.api.ticket.assign_ticket_to_agent` (`AGENTS.md:131`) | That function exists at `helpdesk/api/ticket.py:61` but is **not** whitelisted, so the example call would fail. Use `HDTicket.assign_agent` (`hd_ticket.py:520`) instead |
+| Spec example `docs/erpnext-customer-sync.md` (`AGENTS.md:411`) | No such file exists |
+| Reference link `[README.md](../README.md)` (`AGENTS.md:366`) | This path is wrong from the repo root, where `AGENTS.md` lives. Presumably the text was copied from a `.github/` file (**Unverified**) |
+| Frontend dev server on port 8080 | Correct by default, but the port comes from the frappe-ui plugin (8080 + (webserver_port − 8000)), not from `desk/vite.config.js`. This was found in the frappe-ui package source and is **Unverified** in this repo |
 
 ## 6. Known issues, TODOs, and fragile areas
 
-_Section in progress._
+Everything below was found by reading the code. Items without an **Unverified** label were confirmed at the cited lines. None was reproduced on a running site, so the *impact* column is a reading of the code, not an observed failure. The repo has no issue tracker data in this checkout, so "known" means "visible in the code".
+
+### 6.1 Confirmed bugs (likely user-visible)
+
+| # | Issue | Where | What happens |
+|---|---|---|---|
+| B1 | `is_agent(user)` checks `is_admin()` **without passing `user`** | `helpdesk/utils.py:54-58` | While the session user is Administrator, `is_agent(<anyone>)` returns True. `HD Ticket.has_permission` and `permission_query` call `is_agent(user)` for other users (`hd_ticket.py:1342,1387`). How much this matters in practice is **Unverified** |
+| B2 | Three meanings of "admin" | `helpdesk/utils.py:35-43` vs `helpdesk/api/auth.py:28` vs `desk/src/components/ticket-agent/TicketHeader.vue:267` | System Managers see **Delete ticket**, but `delete_ticket` accepts only the literal `Administrator` and throws `PermissionError` (`helpdesk/api/ticket.py:79-86`) |
+| B3 | `next_working_day_dt` is used when unbound | `helpdesk/helpdesk/doctype/hd_settings/helpers.py:123-132` | The outside-hours banner raises `UnboundLocalError` for a ticket without `response_by`, for example one with no SLA |
+| B4 | No branch for an unknown `ticket_type` | `helpdesk/api/agent_home/agent_home.py:575-586` | `get_pending_tickets("x")` raises `UnboundLocalError` instead of a validation error |
+| B5 | `filters.get` is called before the `None` guard | `helpdesk/api/dashboard.py:34` | Non-managers who call `get_dashboard_data` without filters get `AttributeError` |
+| B6 | `return` inside the copy loop | `helpdesk/helpdesk/doctype/hd_ticket/api.py:388-420` (`duplicate_list_retain_timestamp`) | When tickets are merged, only the **first** File attachment is copied |
+| B7 | Unpacking a possibly-`None` result | `helpdesk/helpdesk/doctype/hd_form_script/hd_form_script.py:28,32` with `:38-42` | Toggling `enabled` on a script whose name lacks "Field Dependency" raises `TypeError`. Exactly which scripts reach this path is **Unverified** |
+| B8 | A re-opened ticket notifies assignees as a **"Reaction"** | `helpdesk/helpdesk/doctype/hd_ticket/hd_ticket.py:228-237` | Wrong notification type and wording |
+| B9 | Every customer reply re-opens the ticket | `hd_ticket.py:830-833` (the `Paused`-only check is commented out) | Replying to a Resolved ticket through the portal moves it back to the reopen status, whatever its category. Whether that is intended is **Unverified** |
+| B10 | Team auto-assign conditions hard-code `status == 'Open'` and interpolate the team name into code | `helpdesk/helpdesk/doctype/hd_team/hd_team.py:104-116`; also `hd_settings/hd_settings.py:61` | Tickets in any *other* Open-category status are never auto-assigned. A `'` or `"` in a team name breaks the Python condition and its JSON |
+| B11 | Success-toast string mismatch | `desk/src/main.js:46` vs `hd_ticket.py:166` | The frontend compares against "…customer." **with** a period, and the server sends it without one (and translated). The special toast never shows |
+| B12 | `removeEventListener` is given a new arrow function | `desk/src/composables/realtime.ts:25-35` | The `beforeunload` listener is never removed and piles up as agents open tickets |
+| B13 | `via_customer_portal = bool(frappe.session.user)` | `hd_ticket/api.py:31` | Always True for a logged-in user, so every ticket created through `new` is flagged as a portal ticket. That includes tickets agents raise on the agent "new ticket" page, which uses the same endpoint (`desk/src/pages/ticket/TicketNew.vue:253`). A side effect is that `after_insert` skips the acknowledgement email for such tickets (`hd_ticket.py:181-189`) |
+| B14 | Report time slot | `helpdesk/helpdesk/report/support_hour_distribution/support_hour_distribution.py:19` | The "9PM - 12AM" slot is `21:00–23:00`, so tickets created 23:00–24:00 are never counted |
+| B15 | Hard-coded filter | `helpdesk/helpdesk/report/ticket_search_analysis/ticket_search_analysis.py:65` | Uses `agent_group like '%FC%'`, apparently a leftover from Frappe Cloud's own use (**Unverified**) |
+| B16 | Duplicate `tearDown` in one test class | `helpdesk/helpdesk/doctype/hd_agent/test_hd_agent.py:33,344` (class at `:21`) | The second definition silently replaces the first, so the first cleanup never runs |
+
+### 6.2 Security- and permission-sensitive areas
+
+Review these carefully before changing them. Items not marked **Unverified** were confirmed at the cited lines.
+
+- **Whitelisted methods with weak or no permission checks.**
+  - `helpdesk.search.build_index`: any logged-in user can trigger a synchronous rebuild. There is no role check (`helpdesk/search.py:355-362`).
+  - `remove_assignments` (`helpdesk/api/doc.py:679-692`).
+  - `show_outside_hours_banner` (`hd_ticket/api.py:787-805`) loads any ticket with `get_doc`.
+  - `get_reactions` (`hd_ticket_comment/hd_ticket_comment.py:106-140`).
+  - `get_field_dependency` (`helpdesk/api/settings/field_dependency.py:15`).
+  - Several read-only KB helpers.
+  - `assign_agent` has no `is_agent()` guard, unlike `new_comment` and `reply_via_agent`. It relies on Frappe's `assign_to.add` checks (`hd_ticket.py:520`).
+- **Guest endpoints.**
+  - `helpdesk.api.config.get_config` exposes feature flags, including `restrict_tickets_by_agent_group` (`helpdesk/api/config.py:4-5`).
+  - `helpdesk.api.general.get_translations`.
+  - `helpdesk.api.knowledge_base.get_article` (published articles only; `helpdesk/api/knowledge_base.py:10-14`).
+  - The `ticket-feedback` web form. It is `login_required: 0` and can **close a ticket**, protected only by the ticket's UUID `key` (`hd_email_feedback/hd_email_feedback.py:44-48`; `web_form/email_feedback/`).
+- **Group-by label lookup reads client-chosen fields.** `get_list_data` calls `frappe.db.get_value(label_doc, option, label_field)` with `label_doc` and `label_field` taken from the request's `view` dict, with no permission check (`helpdesk/api/doc.py:45-46,180-187`). The option values come from a permitted list. How exploitable this is remains **Unverified**.
+- **Cached permission check.** `get_filterable_fields` is wrapped in `@redis_cache()` and calls `check_permissions` inside the cached body (`helpdesk/api/doc.py:244-253`). **Unverified:** whether the cache key includes the user. If it doesn't, the permission check is skipped on cache hits, and results stay stale after settings or custom-field changes, because nothing invalidates the cache.
+- **Ticket search indexes internal comments.**
+  - `helpdesk.api.search.search` is not agent-only (`helpdesk/api/search.py:11`).
+  - The SQLite index includes `HD Ticket Comment` (`helpdesk/search_sqlite.py:52-61`) and filters results only by ticket readability.
+  - **Unverified:** whether Frappe's `SQLiteSearch` adds its own doctype-level checks. If not, a customer could find agents' internal notes on their own tickets.
+  - The parsed `limit` parameter is never passed on (`helpdesk/api/search.py:21,38`).
+- **Analytics bypass team restrictions.**
+  - `helpdesk/api/dashboard.py`, `dashboard_tags.py`, `analytics_utils.py`, `ticket_stats.py`, and `agent_home/` use `frappe.qb` or `frappe.get_all`, which ignore `permission_query`.
+  - `ticket_stats` lets any agent read stats for any customer or contact, and `helpdesk/api/test_ticket_stats.py:38` asserts that. Whether that is intended is **Unverified**.
+- **Admin-authored code runs in every agent's browser.** `HD Form Script` bodies are executed with `new Function` (`desk/src/composables/formCustomisation.ts:41,149`). This is by design, but treat Form Script write access as code-deployment rights.
+- **Saved-reply template context.** Rendering uses `{**ticket.as_dict(), **user}` (`helpdesk/api/saved_replies.py:29-30`), so User keys such as `name`, `owner`, and `creation` override the ticket's, and `{{ name }}` renders the agent's ID.
+- **Optional endpoint allowlist.** `helpdesk/auth.py` matches `allowed_custom_endpoints` by *substring* (`:127-129`) and allows `frappe.client.insert`, `set_value`, and `delete` for website users. It only runs when `block_endpoints` is set (`:71`).
+- **Deactivated agents.** `is_agent` does not check `HD Agent.is_active` (`helpdesk/utils.py:54-58`), and roles are not removed on deactivation. **Unverified** in practice.
+
+### 6.3 Fragile areas (correct today, easy to break)
+
+- **HD Ticket saves are re-entrant and heavy.**
+  - `before_validate` re-selects the SLA **on every save** (`hd_ticket.py:980`).
+  - `on_communication_update` saves the ticket again (`:1072-1113`).
+  - `create_communication_via_contact` saves before it inserts the Communication (`:830-848`). That this triggers a second save through `on_communication_update` is **Unverified**.
+  - Feedback and acknowledgement emails are sent with `now=True` from `before_save` and `after_insert`, and a send failure throws, **blocking the save** (`:119-189`).
+- **`status_category` depends on `fetch_from`.** `set_status_category` fills it only when empty (`hd_ticket.py:1029-1034`), and `set_first_responded_on` reads it in `before_validate`. **Unverified:** whether Frappe refreshes `fetch_from` values before or after `before_validate`. If after, status changes are evaluated against a stale category.
+- **Scheduler jobs scale with the number of open tickets.**
+  - `update_sla_status_in_ticket` loads every Open ticket that has an SLA, plus that SLA, every hour, and commits per ticket (`hd_ticket.py:1534-1562`).
+  - `close_tickets_after_n_days` INNER-JOINs the latest Communication, so tickets with **no** communications never auto-close. It also closes to the hard-coded status "Closed" (`:1491-1531`).
+  - Saving a holiday list synchronously re-saves every Open ticket on each linked SLA (`hd_service_holiday_list/hd_service_holiday_list.py:83-104`).
+  - `get_holidays` reloads the holiday list on every call, and `apply()` calls it several times (`hd_service_level_agreement.py:487-494`).
+- **Knowledge-base search index.**
+  - There is no incremental indexing (§4.5), so edited articles reach search only after a rebuild.
+  - If `build_index` raises, the `helpdesk_search_indexing_in_progress` cache flag is never reset (no `try/finally`), and `build_index_in_background` then skips forever (`helpdesk/search.py:357-368`).
+  - `download_corpus` runs on the `all` scheduler event and downloads NLTK data from the internet when it is missing (`helpdesk/hooks.py:37-38`; `helpdesk/search.py:377-387`). **Unverified:** how it behaves on offline servers.
+- **Realtime listener hygiene in the SPA.**
+  - A bare `$socket.off("<event>")` removes **all** listeners for that event, including other components' (`desk/src/pages/ticket/TicketAgent.vue:228-230`, `desk/src/pages/ticket/Tickets.vue:475`, `desk/src/composables/realtime.ts:137-138`).
+  - `useActiveViewers` registers `ticket_viewers` with no `off`, and `TicketAgent.vue:153` calls it inside a `computed`, so every recompute adds another listener.
+  - `src/socket.ts:26` also calls `initSocket()` at import time, in addition to `main.js:89,94`. That this opens a second connection is **Unverified**.
+- **Module-level mutable defaults in settings editors.** `desk/src/stores/sla.ts:53,75` and `desk/src/stores/assignmentRules.ts:26,42` assign the same default array on every reset, and child components push to it and splice it. Edits can leak into the next "new" SLA or rule.
+- **Router `isMobileView` is frozen.** `useScreenSize()` is called at module scope in `desk/src/router/index.ts:7`, where no component lifecycle exists, so resize is never tracked there.
+- **`globalStore()` depends on creation order.** It uses `getCurrentInstance()` inside a Pinia setup function (`desk/src/stores/globalStore.ts:5-6`). This works only because `App.vue` creates it first. **Unverified:** whether a first call from outside a component would throw.
+- **Portal mode is a global mutable ref.** `isCustomerPortal` (`desk/src/utils.ts:270`) is set by the router guard and read by shared pages. Anything that renders before navigation completes sees the old value.
+- **Build requires a bench layout.** `desk/src/socket.ts:2` imports `../../../../sites/common_site_config.json`, and `@framework/ui` links to `../../frappe/ui` (`desk/package.json:13`). A stand-alone `yarn build` outside a bench fails.
+- **Local frappe-ui mode is half-wired.** The aliases are commented out (`desk/vite.config.js:106`), so "local frappe-ui" swaps only the Vite plugin, not the library code.
+- **frappe-ui is pinned and patched.** Upgrading `frappe-ui` requires re-applying `desk/patches/frappe-ui+1.0.0-beta.24.patch`, and the Vite `dedupe` list exists because duplicate ProseMirror instances break the editor (`desk/vite.config.js:108-133`).
+- **The ERPNext sync depends on loop-prevention flags** (`ignore_erpnext_sync`, the cascade flag). Any new write path that forgets them can cause recursive syncs (§4.8).
+- **`docker/init.sh`.** If a bench already exists, it runs `bench start`. When that exits, the script falls through and runs `bench init` again (`docker/init.sh:3-11`). Its shebang is `#!bin/bash` (missing `/`), which is harmless only because compose runs it with `bash`.
+
+### 6.4 Tech debt, dead code, and convention drift
+
+- **TODO markers** (the repo has very few):
+  - `hd_ticket.py:546,551,558` (`get_assigned_agent`: "deprecate", "temporary fix").
+  - `hd_ticket.py:1103` (`auto_update_status`).
+  - `hd_ticket/api.py:570`.
+  - `helpdesk/api/doc.py:336` (custom fields in filterable fields).
+  - `helpdesk/helpdesk/report/ticket_analytics/ticket_analytics.py:15-18`: `get_fiscal_year()` returns today, so the "Yearly" range is wrong.
+  - `helpdesk/setup/install.py:52`.
+- **Deprecation.** `HD Ticket Template` is flagged "will be deprecated in the future" (`hd_ticket_template/hd_ticket_template.json:7`) but is still used by `TicketNew.vue` and `hd_ticket_template/api.py`.
+- **Dead or unreferenced code** (found by grep):
+  - `helpdesk/public/erpnext/customer_list.js`: no `doctype_list_js` hook loads it. **Unverified** whether something else does.
+  - `helpdesk/extends/data_import.py` `bulk_insert`: whitelisted, with no caller.
+  - `desk/src/pages/HRoot.vue` and `desk/src/pages/ticket/TicketBreadcrumbs.vue`: referenced by no route or import.
+  - The unused route-meta fields `auth`, `agent`, `admin`, `onSuccessRoute`, `parent` (`desk/src/router/index.ts:12-21`).
+  - The `ping` and `ticket_get_viewers` handlers and the `ticket_response_room` helper in `realtime/handlers.js`.
+  - The SVG sets in `desk/src/assets/icons/` and `desk/src/assets/custom_icons/`.
+  - `desk/public/article.png` and `article-2.png`.
+- **Duplicate names.**
+  - Two different `HelpdeskSearch` classes and two `build_index` functions (`helpdesk/search.py:214,357`; `helpdesk/search_sqlite.py:18,238`).
+  - `create_agent` and `make_agent` in `helpdesk/test_utils.py` (`:175`, `:309`) behave differently (only `create_agent` adds the Agent role).
+- **Test-helper rule (AGENTS.md rule 3) violations.** Helpers are defined inside test files in:
+  - `helpdesk/api/agent_home/test_agent_home.py:26,65`;
+  - `hd_saved_reply/test_hd_saved_reply.py`;
+  - `hd_saved_reply/test_hd_saved_reply_actions.py`;
+  - `hd_ticket/test_hd_ticket.py:50-76`;
+  - `hd_service_holiday_list/test_hd_service_holiday_list.py`;
+  - `hd_form_script/test_hd_form_script.py`;
+  - `hd_customer/test_hd_customer.py`.
+
+  Several helpers in `helpdesk/test_utils.py` also lack docstrings.
+- **Test isolation.** `test_agent_home.py` `setUp` deletes **all** HD Tickets and commits (`:108-111`). `test_hd_ticket.py:93-114` also deletes every ticket.
+- **Untested areas.** There are no tests for `helpdesk/api/doc.py` (the list engine), `api/search.py`, `api/session.py`, `api/settings/*`, `helpdesk/auth.py`, `helpdesk/search.py`, `overrides/email_account.py`, or `extends/*`. Frontend tests: none.
+- **Untranslatable strings.**
+  - f-strings inside `_()`: `hd_ticket_status/hd_ticket_status.py:56`, `hd_ticket/api.py:383`.
+  - `_("...", self.name)` passes the name as the *language* argument (`hd_article_category/hd_article_category.py:149-152`).
+  - Untranslated literals, for example in `helpdesk/api/ticket_analytics.py` and `desk/src/utils.ts:940-952`.
+- **Undeclared dependencies.** Three reports import `six`, which `pyproject.toml` does not declare. The roles "Support Team", "Supported Site User", and "External Agent" are referenced in DocType JSON but never created by this app. Both are **Unverified** as real problems on a fresh site.
+- **Save-discipline violations** against `AGENTS.md`:
+  - `HDSettings.create_base_support_rotation` saves inside a helper (`hd_settings/hd_settings.py:53-82`).
+  - `HDTeam.on_trash` commits inside a request (`hd_team/hd_team.py:46`).
+  - `HDAgent.before_save` renames the document to the user (`hd_agent/hd_agent.py:41-45`).
+- **`AGENTS.md` drift** is listed in §5.4.
+- **Missing spec.** `AGENTS.md` names `docs/erpnext-customer-sync.md` as the spec for the ERPNext sync, but no such file exists. Under rule 2, whoever next changes that feature should create it.
+- **Debug leftovers.** `print("\n\n", index_exists, "\n\n")` in `helpdesk/setup/install.py:480`. Also, `add_index_if_not_exists` drops and re-creates the index even when it exists, despite its name (`:469-492`). There are `console.log` calls in `desk/src/composables/useView.ts:109` and `desk/src/pages/ticket/TicketCustomer.vue:196,209,241`.
+
+### 6.5 Unverified risks worth checking on a real site
+
+- **Large sites and search.** `search_sqlite._get_accessible_tickets` loads every accessible ticket name (`helpdesk/search_sqlite.py:119`), and post-filtering happens after the engine's own limit, so pages can come back short for users who can see more than 500 tickets.
+- **`set_customer` with `auto_set_customer_from_contact` off** returns early (`hd_ticket.py:325-328`). A portal user might then be able to set an arbitrary `customer` on their ticket, which would expose it to that customer's managers.
+- **`default_ticket_outgoing_email_account`** only matches accounts that have an IMAP folder appending to HD Ticket (`helpdesk/helpdesk/utils/email.py:97-111`). POP setups fall through to the site default account.
+- **`socket.ts` URL scheme.** It assumes an explicit port means `http` plus `socketio_port`, and no port means `https` (`desk/src/socket.ts:11-16`). HTTP-only production on port 80, or HTTPS on a custom port, may fail to connect.
+- **`useTicket.ts` `ticketMap`** is never evicted, so memory grows with the number of tickets opened in a session (`desk/src/composables/useTicket.ts:23`).
+- **Production sourcemaps.** Builds ship sourcemaps, because frappe-ui's `buildConfig` defaults to `sourcemap: true` and the repo does not override it.
+
+### 6.6 Component-level findings (`desk/src/components/`)
+
+**Confirmed in code:**
+
+- **Duplicate import bindings.** `Settings/settingsModal.ts:18-24` imports `FieldDependencyIcon` and `PhoneIcon` twice.
+  - This does **not** break today's build. esbuild 0.18, which Vite 4.5.14 uses (`desk/yarn.lock`: `esbuild "^0.18.10"`), silently merges duplicate imports under its TypeScript loader. That was tested in a scratch directory with esbuild 0.18.20.
+  - The same code under esbuild's JavaScript loader fails with "The symbol … has already been declared".
+  - A `tsc` run would presumably also reject it (**Unverified**; not run). Remove the duplicate when you next touch the file.
+- **Invalid `v-for` key.** `conditions-filter/CFConditions.vue:5` uses `:key="condition.field"`. Conditions are arrays such as `["status","==","Open"]` or the string `"and"` (see the format in `helpdesk/helpdesk/doctype/hd_team/hd_team.py:106-110`), so every key is `undefined`. `CFConditions.vue` and `CFCondition.vue` also mutate their props in place.
+- **Global dialog stack only grows.** `dialogs.jsx:35-42` pushes every dialog into a global array and never removes it.
+- **`Resizer.vue` doesn't restore or clean up.** It saves `sidebarWidth` to `localStorage` but always starts from `defaultWidth`. It also adds a new anonymous `mouseup` listener on every drag, which is never removed (`Resizer.vue:40-56`).
+- **Hard-coded English label comparisons.**
+  - `ListViewBuilder.vue:586` checks `column.label == "Status"`.
+  - `ticket/TicketAgentActivities.vue:155-170` matches the English tab titles. That works only because the tab labels in `ticket-agent/TicketActivityPanel.vue:85-110` are untranslated.
+  - `pages/ticket/MobileTicketAgent.vue` translates `__("viewed this")` but then compares against the untranslated string (`:579` vs `:621`). **Unverified:** that this breaks activity grouping in non-English locales.
+- **Side effects inside `computed`.** `ticket-agent/TicketActivityPanel.vue:160-169` rewrites `activities.data.history[].action` in place.
+- **Duplicated logic** that can drift apart:
+  - Activity flattening in `TicketActivityPanel.vue:120-237` vs `MobileTicketAgent.vue` (~540-630).
+  - Assign plus client-side activity logging in `AssignTo.vue:518-541` vs `command-palette/ticketCommands.ts:355-391`.
+  - Which phone number to call first: `TicketAgent.vue:144` uses `phone || mobile_no`, but `ticket-agent/TicketContact.vue:87` uses `mobile_no || phone`.
+  - Ticket URLs built by hand from `window.location.origin + "/helpdesk/tickets/"` in five places.
+- **Duplicate basenames under auto-registration.**
+  - `Autocomplete.vue` vs `frappe-ui/Autocomplete.vue`.
+  - `view-controls/Filter.vue` (legacy) vs `view-controls/filter/Filter.vue` (in use).
+  - Three `TicketFeedback.vue` files: `ticket/`, `ticket-agent/`, and `pages/ticket/`.
+  - `<TicketFeedback>` and `<Autocomplete>` are used without imports in some places (`ticket/TicketCustomerSidebar.vue:88`, `MobileTicketAgent.vue:99`, `Settings/Preferences/components/LanguageTimezoneSetting.vue:28`). **Unverified:** which file the resolver picks.
+- **Unreferenced components** (grep over `desk/src`): `SidebarLink.vue`, `desk/global/CustomIcons.vue` (1,535 lines), `desk/global/AddNewAgentsDialog.vue`, `erpnext-integration/ERPNextCustomerSyncButton.vue`, `ticket-agent/TicketContactTab.vue`, `ticket-agent/TicketNavigation.vue` (its template is fully commented out), `ticket/TicketAgentDetails.vue`. `MultiSelect.vue`, `Pill.vue`, and `SearchComplete.vue` are effectively unused.
+- **Leftover debug logging.**
+  - `TypingIndicator.vue:36-37` logs inside a `computed`.
+  - `telephony/TwilioCallUI.vue:449-455` logs from a watcher.
+  - `ticket/TicketAgentContact.vue:36` has a button whose click handler only logs.
+- **Undeclared dependencies.** `reka-ui` is imported directly (`command-palette/CommandPalette.vue:181` and others) and `@headlessui/vue` is used in 7 files. Neither is declared in `desk/package.json`; both arrive transitively through frappe-ui. The `.check.ts` scripts need `tsx`, which is not declared anywhere.
+- **Awkward paths.** The folder `Settings/Assignment Rules/` contains a space, which breaks naive shell scripts. `Settings/Holiday/HLCalender.vue` is misspelled.
+- **TODO markers:**
+  - `view-controls/Filter.vue:252`
+  - `EmailArea.vue:240`, with a commented-out block containing `console.log`
+  - `frappe-ui/PhoneControl/PhoneControl.vue:123` ("replace with reka-ui")
+  - `ticket-agent/TicketActivityPanel.vue:117` ("refactor for pagination")
+  - `ticket-agent/TicketContactTab.vue:2`
+  - `ticket-agent/TicketDetailsTab.vue:354`
+- **Largest components.** These are the riskiest to edit: `ListViewBuilder.vue` (906 lines), `ticket-agent/analytics/TicketTimeline.vue` (799), `EmailEditor.vue` (698), `Settings/Assignment Rules/AssignmentRuleView.vue` (665), `ticket-agent/AssignTo.vue` (631), `Settings/Sla/SlaPolicyView.vue` (571).
+- **Translation gaps.**
+  - Three `__()` calls wrap template literals, so they can never match a translation: `ticket-agent/TicketHeader.vue:199`, `Settings/Agents.vue:274`, `Settings/Sla/Modals/WorkDayModal.vue:278`.
+  - Several components translate strings a second time that their callers already translated (for example `Section.vue`, `EmptyState.vue`, `SettingsModal.vue:28-51`).
+
+**Unverified:**
+
+- `ListViewBuilder.vue:531-535` and `composables/useView.ts:32-38` rely on frappe-ui keeping the original data when a resource `transform` returns `undefined`.
+- `ticket/TicketAgentActivities.vue:199,212` uses the non-standard `scrollIntoViewIfNeeded`, which MDN lists as unsupported in Firefox. That is outside knowledge and was not checked in a browser here.
